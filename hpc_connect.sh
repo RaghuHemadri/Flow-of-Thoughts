@@ -2,24 +2,25 @@
 # Usage: ./hpc_connect.sh <compute_node> [username]
 #        ./hpc_connect.sh kill
 
-COMPUTE_NODE=${1:?"Error: compute node required. Usage: $0 <compute_node> [username] | kill"}
-USER=${2:-"rh3884"}
-LOGIN_HOST="login.torch.hpc.nyu.edu"
-PORT=60869
-PID_FILE="/tmp/hpc_tunnel.pid"
-
 if [ "$1" == "kill" ]; then
+  PID_FILE="/tmp/hpc_tunnel.pid"
   if [ -f "$PID_FILE" ]; then
-    PID=$(cat $PID_FILE)
+    PID=$(cat "$PID_FILE")
     echo "==> Killing tunnel (PID: $PID)..."
-    kill $PID
-    rm $PID_FILE
+    kill "$PID"
+    rm -f "$PID_FILE"
     echo "==> Tunnel closed."
   else
     echo "==> No active tunnel found."
   fi
   exit 0
 fi
+
+COMPUTE_NODE=${1:?"Error: compute node required. Usage: $0 <compute_node> [username] | kill"}
+USER=${2:-"rh3884"}
+LOGIN_HOST="login.torch.hpc.nyu.edu"
+PORT=60869
+PID_FILE="/tmp/hpc_tunnel.pid"
 
 echo "==> Starting tunnel: $USER@$LOGIN_HOST -> $COMPUTE_NODE on port $PORT..."
 

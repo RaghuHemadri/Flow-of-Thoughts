@@ -305,9 +305,10 @@ class FlowOfThought(nn.Module):
         loss_cfm = F.mse_loss(v, u)
 
         # ── (ii) Decoder loss ────────────────────────────────────────────────
-        # Decode from z* with light noise (robust to ODE endpoint mismatch).
-        # Decoder gradient does NOT flow back through the frozen endpoint.
-        z_for_dec = z_star.detach() + 0.1 * torch.randn_like(z_star)
+        # Decode from integrated endpoint ẑ_1 so decoder and flow are coupled.
+        # This matches the proposal objective L_dec(y | x, ẑ_1).
+        z_hat = euler_solve(self.velocity, z0, c, n_steps=4)
+        z_for_dec = z_hat + 0.1 * torch.randn_like(z_hat)
         logits    = self.decoder(z_for_dec, batch["answer_input_ids"])
         targets   = batch["answer_input_ids"][:, 1:].contiguous()
         loss_dec  = F.cross_entropy(
@@ -316,9 +317,7 @@ class FlowOfThought(nn.Module):
         )
 
         # ── (iii) Contrastive NCE (in-batch negatives) ──────────────────────
-        # Integrate ODE to get predicted endpoint ẑ_1, push it toward z*
-        with torch.no_grad():
-            z_hat = euler_solve(self.velocity, z0, c, n_steps=4)
+        # Push predicted endpoint ẑ_1 toward z* with in-batch negatives
         z_hat_n  = F.normalize(z_hat,  dim=-1)
         z_star_n = F.normalize(z_star, dim=-1)
         sim      = z_hat_n @ z_star_n.T / TAU  # (B, B) — diagonal = positives
@@ -346,14 +345,14 @@ class FlowOfThought(nn.Module):
 # ---------------------------------------------------------------------------
 
 if is_master:
-    print("Loading GPT-2 and building FlowOfThought model...")
+    print(f"Loading backbone ({BACKBONE}) and building FlowOfThought model...")
 
 model = FlowOfThought()
 n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if is_master:
     n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    print(f"Trainable params: {n_trainable / 1e6:.1f}M  |  Frozen (GPT-2): {n_frozen / 1e6:.1f}M")
+    print(f"Trainable params: {n_trainable / 1e6:.1f}M  |  Frozen backbone: {n_frozen / 1e6:.1f}M")
 
 per_gpu_batch = max(1, BATCH_SIZE // world_size)
 train_loader  = make_dataloader("train", tokenizer, batch_size=per_gpu_batch, shuffle=True)
@@ -473,7 +472,7 @@ for reflow_iter in range(K_REFLOW):
     raw_model    = accelerator.unwrap_model(model)
     raw_model.eval()
 
-    # Collect (z0, z1, c) pairs from current model using high-step solver
+    # Collect (z0, z1, c, answer_ids) tuples from current model using high-step solver
     reflow_pairs = []
     reflow_loader = make_dataloader("train", tokenizer, batch_size=per_gpu_batch, shuffle=False)
     reflow_loader = accelerator.prepare(reflow_loader)
@@ -485,25 +484,43 @@ for reflow_iter in range(K_REFLOW):
             )
             z0 = torch.randn(c.size(0), D_Z, device=c.device)
             z1 = euler_solve(raw_model.velocity, z0, c, n_steps=REFLOW_STEPS)
-            reflow_pairs.append((z0.cpu(), z1.cpu(), c.cpu()))
+            reflow_pairs.append((
+                z0.cpu(),
+                z1.cpu(),
+                c.cpu(),
+                batch["answer_input_ids"].cpu(),
+            ))
             if len(reflow_pairs) * per_gpu_batch >= 2000:
                 break
 
-    # Retrain velocity on straightened (z0, z1) pairs + keep decoder anchored
+    # Retrain velocity on straightened (z0, z1) pairs while keeping decoder anchored
     raw_model.train()
     t_reflow_start = time.time()
     reflow_budget  = TIME_BUDGET // max(K_REFLOW, 1)
     ri = 0
 
     while time.time() - t_reflow_start < reflow_budget:
-        z0_r, z1_r, c_r = reflow_pairs[ri % len(reflow_pairs)]
-        z0_r, z1_r, c_r = z0_r.to(device), z1_r.to(device), c_r.to(device)
+        z0_r, z1_r, c_r, ans_ids_r = reflow_pairs[ri % len(reflow_pairs)]
+        z0_r = z0_r.to(device)
+        z1_r = z1_r.to(device)
+        c_r = c_r.to(device)
+        ans_ids_r = ans_ids_r.to(device)
 
         t   = torch.rand(z0_r.size(0), device=device)
         z_t = (1 - t[:, None]) * z0_r + t[:, None] * z1_r
         u   = z1_r - z0_r
         v   = raw_model.velocity(z_t, t, c_r)
-        rl  = F.mse_loss(v, u)
+        rl_cfm = F.mse_loss(v, u)
+
+        z_reflow_dec = z1_r + 0.1 * torch.randn_like(z1_r)
+        logits_r = raw_model.decoder(z_reflow_dec, ans_ids_r)
+        targets_r = ans_ids_r[:, 1:].contiguous()
+        rl_dec = F.cross_entropy(
+            logits_r.reshape(-1, VOCAB_SIZE), targets_r.reshape(-1),
+            ignore_index=PAD_ID,
+        )
+
+        rl = rl_cfm + LAMBDA_DEC * rl_dec
 
         optimizer.zero_grad()
         accelerator.backward(rl)

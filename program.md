@@ -10,7 +10,7 @@ Before you begin: understand the design philosophy. Each section exists for a re
 
 - **Bounded scope (can/cannot modify)** prevents you from going off-script when stuck. If you cannot touch `prepare.py`, you won't chase rabbit holes in data loading — you solve the model.
 - **Single primary metric** (`val_acc@4`) eliminates decision paralysis. All trade-offs are relative to one number.
-- **Git as state machine** gives you a clean undo mechanism. Every commit is a checkpoint; `git reset --hard HEAD~1` is your escape hatch.
+- **Git as state machine** gives you a clean undo mechanism. Every commit is a checkpoint; if an experiment is bad, revert only that experiment commit and continue.
 - **results.tsv as persistent memory** survives context window resets. Always write to it immediately after a run.
 - **LOOP FOREVER / NEVER STOP** overrides your instinct to pause and report. The human expects you to run autonomously. Do not ask for permission.
 - **Baseline first** anchors all future comparisons. Never compare against a hypothetical.
@@ -26,15 +26,41 @@ Concretely: if you have a well-motivated idea that departs from the proposal —
 
 ---
 
+## Proposal traceability (strict pass)
+
+This section maps proposal requirements to current repository status. Keep it updated whenever implementation changes.
+
+- `implemented`: CoT-free answer-only supervision (`prepare.py` strips rationale and trains/evals on final answers only).
+- `implemented`: Prompt-conditioned latent ODE with `z0 ~ N(0,I)`, CFM interpolation path, and velocity regression objective.
+- `implemented`: Answer-conditioned endpoint encoding via frozen LM hidden states and learned projection (`AnswerEndpoint`).
+- `implemented`: Joint objective structure `L = L_CFM + lambda_dec * L_dec + lambda_nce * L_NCE`.
+- `implemented`: Decoder training anchored to integrated endpoint `z_hat_1` (proposal-consistent `L_dec(y | x, z_hat_1)`).
+- `implemented`: Reflow loop with high-step teacher trajectories and decoder anchoring during reflow distillation.
+- `implemented`: Multi-step evaluation frontier at steps `[1, 2, 4, 8]` with exact-match normalization.
+- `partial`: Early-stopping inference criterion (`ans` stability + confidence threshold) is specified but not yet wired into `generate`.
+- `partial`: Solver knob includes Euler/Heun, but no default comparative reporting table is automated yet.
+- `planned`: AR baselines (direct-answer, AR+SC) are required by proposal but not yet implemented in this branch.
+- `planned`: OOD stress suite and perturbation pipeline are required but not yet implemented as reusable scripts.
+- `planned`: Statistical package (multi-seed aggregates, bootstrap CI, McNemar) is required but not yet automated.
+- `guardrail`: `prepare.py` remains read-only for experiment iterations; any mismatch with proposal should be resolved in `train.py`, docs, or new scripts.
+
+---
+
 ## Hardware
 
-This experiment runs on **4 GPUs** (e.g., 4× A100 40GB or 4× H100). Training uses `accelerate launch --num_processes 4` to launch one process per GPU. Only the main process logs output and runs evaluation. Each experiment runs for a **fixed time budget of 5-10 minutes** (wall-clock training time, excluding startup/compilation). The exact budget is controlled by the `TIME_BUDGET` environment variable (default: 300s / 5 min; max: 600s / 10 min). Set `TIME_BUDGET=600` for longer runs when sweeping large architectures.
+This experiment runs on **4 GPUs** (e.g., 4× A100 or 4× H100). Training uses `accelerate launch --num_processes 4` to launch one process per GPU. Only the main process logs output and runs evaluation. Each experiment runs for a **fixed time budget of 5-10 minutes** (wall-clock training time, excluding startup/compilation). The exact budget is controlled by the `TIME_BUDGET` environment variable (default: 300s / 5 min; max: 600s / 10 min). Set `TIME_BUDGET=600` for longer runs when sweeping large architectures.
 
 ---
 
 ## Setup
 
 Work through these steps once, then enter the experiment loop.
+
+### Environment policy (must follow)
+
+- Use the base Python environment on the machine. Do not create or activate any virtual environment.
+- Run commands directly (`python`, `accelerate`, `pip`) from the base environment.
+- Do not use `uv run` in this repository.
 
 ### 1. Agree on a run tag
 
@@ -50,17 +76,16 @@ git checkout -b flow/<tag>
 
 Read all of these for full context before touching anything:
 
-- `prepare.py` — **DO NOT MODIFY.** Contains: GSM8K data loading (answer-only, no rationales), tokenizer (GPT-2 BPE), answer normalization (`normalize_answer`), exact-match evaluation (`evaluate_gsm8k`), and fixed constants (`SEQ_LEN=128`, `LATENT_DIM=256`, `TIME_BUDGET_SECONDS` read from env, default 300s).
+- `prepare.py` — **DO NOT MODIFY.** Contains: GSM8K data loading (answer-only, no rationales), tokenizer loading, answer normalization (`normalize_answer`), exact-match evaluation (`evaluate_gsm8k`), and fixed constants (`MAX_SEQ_LEN=128`, `MAX_ANS_LEN=16`, `LATENT_DIM=256`, `CONTEXT_DIM=256`, `TIME_BUDGET` read from env, default 300s).
 - `train.py` — **THE ONLY FILE YOU MODIFY.** Contains: encoder (`PromptEncoder`), endpoint constructor (`AnswerEndpoint`), vector field (`VelocityField`), decoder (`AnswerDecoder`), training loop, reflow distillation, and inference procedure.
 
 ### 4. Verify data
 
-Check that `~/.cache/flow_of_thought/gsm8k/` contains:
-- `train_answers.jsonl` — `{"problem": "...", "answer": "..."}` (answer only, rationale stripped)
-- `test_answers.jsonl` — same format
-- `tokenizer/` — GPT-2 tokenizer files
+Check that `~/.cache/flow_of_thought/` contains:
+- `gsm8k_train.json` — list of `{"question": "...", "answer": "..."}`
+- `gsm8k_test.json` — same format
 
-If missing, run: `uv run prepare.py`
+If missing, run: `python prepare.py`
 
 The evaluation harness calls `evaluate_gsm8k(model, test_loader, n_steps=[1, 2, 4, 8])` which returns a dict `{steps: accuracy}`. It always uses greedy decoding and exact match after `normalize_answer`.
 
@@ -84,9 +109,11 @@ Confirm setup looks good, then immediately begin the experiment loop.
 
 | Constant | Value | Why fixed |
 |---|---|---|
-| `SEQ_LEN` | 128 | Covers all GSM8K problems |
+| `MAX_SEQ_LEN` | 128 | Covers GSM8K problem + answer tokens |
+| `MAX_ANS_LEN` | 16 | Caps answer decoding length |
 | `LATENT_DIM` | 256 | Proposal spec; ablated separately |
-| `TIME_BUDGET_SECONDS` | 300–600 | Wall-clock training budget (env var, default 300s / 5 min, max 600s / 10 min) |
+| `CONTEXT_DIM` | 256 | Prompt-conditioning dimension |
+| `TIME_BUDGET` | 300–600 | Wall-clock training budget (env var, default 300s / 5 min, max 600s / 10 min) |
 | `EVAL_STEPS` | [1, 2, 4, 8] | Defines the frontier |
 | `BATCH_SIZE` | 64 | Set for A100 40GB baseline |
 
@@ -96,7 +123,7 @@ Confirm setup looks good, then immediately begin the experiment loop.
 
 Everything in `train.py` is fair game:
 
-- **PromptEncoder**: architecture (frozen GPT-2 embeddings, trainable transformer layers), hidden dim, pooling strategy.
+- **PromptEncoder**: architecture (frozen backbone embeddings, trainable projection/layers), hidden dim, pooling strategy.
 - **AnswerEndpoint** (`φ_η`): frozen LM choice, pooling (EOS vs mean answer-token hidden states), projection `W` dimensionality, paraphrase consistency regularizer.
 - **VelocityField** (`v_θ`): depth (default 8 layers), width, architecture type (MLP, MLP-Mixer, small Transformer), time embedding (sinusoidal vs learned), conditioning mechanism (FiLM vs concatenation vs cross-attention).
 - **AnswerDecoder** (`p_ψ`): head type (linear projection vs small AR), answer length budget.
@@ -144,7 +171,7 @@ When evaluating whether to keep a change: weigh complexity cost against improvem
 Your very first run must be `train.py` as written (no modifications). This establishes the baseline row in `results.tsv`.
 
 The baseline configuration should be:
-- GPT-2 small (frozen) as encoder.
+- `Qwen/Qwen2.5-1.5B` (frozen) as shared backbone encoder.
 - 8-layer MLP velocity field, hidden dim 512, sinusoidal time embedding, FiLM conditioning.
 - Linear interpolation path.
 - `λ_dec=1.0`, `λ_NCE=0.1`, `τ=0.07`.
@@ -170,7 +197,9 @@ peak_vram_mb:     21504.0
 nfe_budget:       4
 num_steps:        1200
 num_params_M:     47.3
-reflow_iters:     0
+world_size:       4
+k_reflow:         0
+solver:           euler
 ```
 
 Extract key metrics from log:
@@ -209,7 +238,7 @@ Example after several runs:
 
 ```
 commit	val_acc@1	val_acc@4	nfe_budget	memory_gb	status	description
-a1b2c3d	0.089200	0.156300	4	21.0	keep	baseline: 8L MLP v_θ frozen GPT-2 enc
+a1b2c3d	0.089200	0.156300	4	21.0	keep	baseline: 8L MLP v_θ frozen Qwen2.5-1.5B
 b2c3d4e	0.091400	0.162100	4	21.1	keep	FiLM conditioning (was concat)
 c3d4e5f	0.088000	0.153000	4	21.0	discard	remove λ_NCE (worse calibration)
 d4e5f6g	0.000000	0.000000	4	0.0	crash	OT coupling (index error in batch)
@@ -244,14 +273,14 @@ LOOP FOREVER:
    grep "^val_acc@4:\|^val_acc@1:\|^peak_vram_mb:" run.log
    ```
 
-7. **If grep is empty (crash)**: run `tail -n 60 run.log`. If it's a dumb bug (typo, missing import, shape mismatch), fix and re-run. If the idea is fundamentally broken (OOM with no clear fix, diverged loss), log as `crash`, `git reset --hard HEAD~1`, and move on.
+7. **If grep is empty (crash)**: run `tail -n 60 run.log`. If it's a dumb bug (typo, missing import, shape mismatch), fix and re-run. If the idea is fundamentally broken (OOM with no clear fix, diverged loss), log as `crash`, revert only your experiment commit, and move on.
 
 8. **Log to results.tsv** immediately.
 
 9. **Advance or revert**:
    - If `val_acc@4` improved (strictly higher): **keep** the commit, advance.
    - If `val_acc@4` is equal but the code is simpler: **keep** as a simplification win.
-   - If `val_acc@4` is equal or worse and code is more complex: `git reset --hard HEAD~1`, log `discard`.
+   - If `val_acc@4` is equal or worse and code is more complex: revert only the latest experiment commit, log `discard`.
 
 10. Repeat.
 
@@ -259,7 +288,7 @@ LOOP FOREVER:
 
 ## Timeout and crash policy
 
-- **Timeout**: If a run exceeds 12 minutes wall-clock, kill it (`Ctrl-C` or `kill`), log as `crash`, `git reset --hard HEAD~1`, move on.
+- **Timeout**: If a run exceeds 12 minutes wall-clock, kill it (`Ctrl-C` or `kill`), log as `crash`, revert only the latest experiment commit, move on.
 - **Repeated crashes**: If the same idea crashes twice, abandon it. Log both, move on.
 - **OOM**: First try halving the batch size or reducing velocity field width. If still OOM, abandon the idea.
 - **NaN loss**: Check for missing `LayerNorm` before time embedding injection; add gradient clipping (`max_norm=1.0`). If still NaN after one fix attempt, abandon.
@@ -294,7 +323,7 @@ Work through this queue. Re-order based on what the results tell you.
 
 ### Phase 4 — Robustness / OOD (stress suite for the paper)
 
-14. **Format perturbation test** — evaluate on GSM8K with shuffled sentences and distractor facts (generated by `prepare.py`'s `perturb_gsm8k` function). Report worst-case accuracy per example.
+14. **Format perturbation test** — evaluate on GSM8K with shuffled sentences and distractor facts generated by your perturbation pipeline/script. Report worst-case accuracy per example.
 15. **Number scaling OOD** — evaluate on 3-4 digit number variants held out from training.
 
 ---
@@ -317,7 +346,7 @@ The NeurIPS bar: at NFE=4 (4 model calls), Flow-of-Thought must beat AR direct-a
 - [ ] Bootstrap CI for accuracy (n=1000 bootstrap samples).
 - [ ] McNemar test for paired accuracy comparisons vs each baseline.
 - [ ] Report 5th-percentile accuracy across seeds (tail metric — catches high-variance methods).
-- [ ] Contamination check: `prepare.py` runs n-gram overlap between GSM8K train/test; report flagged rate.
+- [ ] Contamination check: run n-gram/subsequence overlap analysis between GSM8K train/test in a separate analysis script; report flagged rate.
 
 ---
 

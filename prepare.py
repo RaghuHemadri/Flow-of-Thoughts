@@ -3,7 +3,7 @@ Fixed data preparation for Flow-of-Thought experiments on GSM8K.
 DO NOT MODIFY — this file contains the fixed evaluation harness and constants.
 
 Usage:
-    uv run prepare.py    # downloads GSM8K and verifies setup
+    python prepare.py    # downloads GSM8K and verifies setup
 """
 
 import os
@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 # Constants (fixed — do not override in train.py)
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LEN  = 128   # max tokens for problem + answer (GPT-2 tokenizer)
+MAX_SEQ_LEN  = 128   # max tokens for problem + answer
 MAX_ANS_LEN  = 16    # max answer tokens (GSM8K answers fit in ≤ 10 tokens)
 LATENT_DIM   = 256   # z-space dimension (d_z)
 CONTEXT_DIM  = 256   # prompt context dimension (d_c)
