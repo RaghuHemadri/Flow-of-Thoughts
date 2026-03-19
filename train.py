@@ -72,7 +72,7 @@ DATA_SLICE_FRAC = float(os.environ.get("DATA_SLICE_FRAC", "1.0"))
 DATA_SLICE_SEED = int(os.environ.get("DATA_SLICE_SEED", "1337"))
 
 # Reflow distillation (0 = no reflow; try 1 or 2 after baseline)
-K_REFLOW     = 1
+K_REFLOW     = 0
 REFLOW_STEPS = 32   # high-step teacher solver for reflow pairs
 
 # Inference
