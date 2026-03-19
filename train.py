@@ -94,7 +94,7 @@ t_start = time.time()
 tokenizer = AutoTokenizer.from_pretrained(BACKBONE)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
-VOCAB_SIZE = tokenizer.vocab_size
+VOCAB_SIZE = len(tokenizer)  # includes special tokens (pad/eos beyond base vocab_size)
 PAD_ID     = tokenizer.pad_token_id
 BOS_ID     = tokenizer.bos_token_id or tokenizer.eos_token_id
 
