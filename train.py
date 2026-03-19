@@ -135,7 +135,7 @@ class PromptEncoder(nn.Module):
         with torch.no_grad():
             h = self.backbone(input_ids, attention_mask=attention_mask).last_hidden_state
         mask = attention_mask.unsqueeze(-1).float()
-        c = (h * mask).sum(1) / mask.sum(1).clamp(min=1)
+        c = (h.float() * mask).sum(1) / mask.sum(1).clamp(min=1)
         return self.proj(c)  # (B, d_c)
 
 
@@ -156,7 +156,7 @@ class AnswerEndpoint(nn.Module):
         seq_lens = attention_mask.sum(1) - 1  # index of last non-pad token
         with torch.no_grad():
             h = self.backbone(input_ids, attention_mask=attention_mask).last_hidden_state
-        h_last = h[torch.arange(h.size(0), device=h.device), seq_lens]  # (B, hidden_size)
+        h_last = h[torch.arange(h.size(0), device=h.device), seq_lens].float()  # (B, hidden_size)
         return self.proj(h_last)  # (B, d_z)
 
 
