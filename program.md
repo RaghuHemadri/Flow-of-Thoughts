@@ -14,7 +14,7 @@ Before you begin: understand the design philosophy. Each section exists for a re
 - **results.tsv as persistent memory** survives context window resets. Always write to it immediately after a run.
 - **LOOP FOREVER / NEVER STOP** overrides your instinct to pause and report. The human expects you to run autonomously. Do not ask for permission.
 - **Baseline first** anchors all future comparisons. Never compare against a hypothetical.
-- **Simplicity criterion** prevents you from keeping changes that add complexity but not value. A model that trains in 5-10 minutes and is wrong half the time is not a paper; a model that is cleanly right matters.
+- **Simplicity criterion** prevents you from keeping changes that add complexity but not value. A model that trains in 5 minutes and is wrong half the time is not a paper; a model that is cleanly right matters.
 
 ---
 
@@ -48,7 +48,7 @@ This section maps proposal requirements to current repository status. Keep it up
 
 ## Hardware
 
-This experiment runs on **4 GPUs** (e.g., 4× A100 or 4× H100). Training uses `accelerate launch --num_processes 4` to launch one process per GPU. Only the main process logs output and runs evaluation. Each experiment runs for a **fixed time budget of 5-10 minutes** (wall-clock training time, excluding startup/compilation). The exact budget is controlled by the `TIME_BUDGET` environment variable (default: 300s / 5 min; max: 600s / 10 min). Set `TIME_BUDGET=600` for longer runs when sweeping large architectures.
+This experiment runs on **4 GPUs** (e.g., 4× A100 or 4× H100). Training uses `accelerate launch --num_processes 4` to launch one process per GPU. Only the main process logs output and runs evaluation. The default run budget is **5 minutes** (`TIME_BUDGET=300`) for fast iteration. Use 10 minutes only for confirmation runs on top candidates.
 
 ---
 
@@ -61,6 +61,7 @@ Work through these steps once, then enter the experiment loop.
 - Use the base Python environment on the machine. Do not create or activate any virtual environment.
 - Run commands directly (`python`, `accelerate`, `pip`) from the base environment.
 - Do not use `uv run` in this repository.
+- For fast screening, use a smaller random data subset via `DATA_SLICE_FRAC` (for example `0.25`).
 
 ### 1. Agree on a run tag
 
@@ -264,9 +265,14 @@ LOOP FOREVER:
 
 5. **Run the experiment**:
    ```bash
-   accelerate launch --num_processes 4 train.py > run.log 2>&1
+   TIME_BUDGET=300 DATA_SLICE_FRAC=0.25 accelerate launch --num_processes 4 train.py > run.log 2>&1
    ```
    Do NOT use `tee` — let all output go to the log file. Only the main process writes the summary block.
+
+   For confirmation runs of promising configs, use full data and optionally longer budget:
+   ```bash
+   TIME_BUDGET=300 DATA_SLICE_FRAC=1.0 accelerate launch --num_processes 4 train.py > run.log 2>&1
+   ```
 
 6. **Read results**:
    ```bash

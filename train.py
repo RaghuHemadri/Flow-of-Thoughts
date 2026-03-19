@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import Accelerator
+from torch.utils.data import DataLoader, Subset
 from transformers import AutoModel, AutoTokenizer
 
 from prepare import (
@@ -64,6 +65,11 @@ LAMBDA_DEC   = 1.0    # weight for decoder loss
 LAMBDA_NCE   = 0.1    # weight for contrastive NCE loss
 TAU          = 0.07   # contrastive temperature
 CURRICULUM_FRAC = 0.30  # ramp λ_CFM 0→1 over first 30% of training (Coconut lesson)
+
+# Fast-screening controls
+# Use DATA_SLICE_FRAC < 1.0 to run on a smaller random subset of train/test data.
+DATA_SLICE_FRAC = float(os.environ.get("DATA_SLICE_FRAC", "1.0"))
+DATA_SLICE_SEED = int(os.environ.get("DATA_SLICE_SEED", "1337"))
 
 # Reflow distillation (0 = no reflow; try 1 or 2 after baseline)
 K_REFLOW     = 0
@@ -355,8 +361,37 @@ if is_master:
     print(f"Trainable params: {n_trainable / 1e6:.1f}M  |  Frozen backbone: {n_frozen / 1e6:.1f}M")
 
 per_gpu_batch = max(1, BATCH_SIZE // world_size)
-train_loader  = make_dataloader("train", tokenizer, batch_size=per_gpu_batch, shuffle=True)
-test_loader   = make_dataloader("test",  tokenizer, batch_size=per_gpu_batch, shuffle=False)
+
+
+def build_loader(split: str, shuffle: bool) -> DataLoader:
+    loader = make_dataloader(split, tokenizer, batch_size=per_gpu_batch, shuffle=shuffle)
+    if DATA_SLICE_FRAC >= 1.0:
+        return loader
+
+    if not (0.0 < DATA_SLICE_FRAC <= 1.0):
+        raise ValueError("DATA_SLICE_FRAC must be in (0, 1].")
+
+    ds = loader.dataset
+    n_keep = max(1, int(len(ds) * DATA_SLICE_FRAC))
+    g = torch.Generator()
+    g.manual_seed(DATA_SLICE_SEED + (0 if split == "train" else 1))
+    keep_idx = torch.randperm(len(ds), generator=g)[:n_keep].tolist()
+    ds_subset = Subset(ds, keep_idx)
+
+    return DataLoader(
+        ds_subset,
+        batch_size=per_gpu_batch,
+        shuffle=shuffle,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=loader.collate_fn,
+        persistent_workers=True,
+        drop_last=(split == "train"),
+    )
+
+
+train_loader = build_loader("train", shuffle=True)
+test_loader = build_loader("test", shuffle=False)
 
 optimizer = torch.optim.AdamW(
     [p for p in model.parameters() if p.requires_grad],
@@ -371,6 +406,7 @@ train_iter = iter(train_loader)
 
 if is_master:
     print(f"Time budget:    {TIME_BUDGET}s  |  world_size: {world_size}  |  per_gpu_batch: {per_gpu_batch}")
+    print(f"Data slice:     {DATA_SLICE_FRAC:.2f}  |  seed: {DATA_SLICE_SEED}")
     print(f"λ_dec: {LAMBDA_DEC}  λ_nce: {LAMBDA_NCE}  τ: {TAU}  K_reflow: {K_REFLOW}  solver: {SOLVER}")
 
 # ---------------------------------------------------------------------------
