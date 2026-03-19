@@ -446,6 +446,11 @@ while True:
     try:
         batch = next(train_iter)
     except StopIteration:
+        # All DDP ranks hit StopIteration at the same step (DistributedSampler guarantees
+        # equal batches per rank). Checking the budget here is safe — no extra collective.
+        if step > 5 and total_training_time >= TIME_BUDGET:
+            batch = None
+            break
         train_iter = iter(train_loader)
         batch = next(train_iter)
 
@@ -490,14 +495,6 @@ while True:
         )
 
     step += 1
-    if step > 5:
-        # Broadcast stop flag so ALL ranks exit at the same step (prevents NCCL deadlock)
-        stop_flag = torch.tensor(
-            [1.0 if total_training_time >= TIME_BUDGET else 0.0], device=device
-        )
-        accelerator.reduce(stop_flag, reduction="sum")
-        if stop_flag.item() > 0:
-            break
 
 if is_master:
     print()
