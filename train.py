@@ -64,7 +64,7 @@ WARMUP_FRAC  = 0.05   # fraction of TIME_BUDGET for LR linear warmup
 LAMBDA_DEC   = 1.0    # weight for decoder loss
 LAMBDA_NCE   = 0.1    # weight for contrastive NCE loss
 TAU          = 0.07   # contrastive temperature
-CURRICULUM_FRAC = 0.30  # ramp λ_CFM 0→1 over first 30% of training (Coconut lesson)
+CURRICULUM_FRAC = 0.40  # ramp λ_CFM 0→1 over first 40% of training (Coconut lesson)
 
 # Fast-screening controls
 # Use DATA_SLICE_FRAC < 1.0 to run on a smaller random subset of train/test data.
@@ -72,7 +72,7 @@ DATA_SLICE_FRAC = float(os.environ.get("DATA_SLICE_FRAC", "1.0"))
 DATA_SLICE_SEED = int(os.environ.get("DATA_SLICE_SEED", "1337"))
 
 # Reflow distillation (0 = no reflow; try 1 or 2 after baseline)
-K_REFLOW     = 1
+K_REFLOW     = 0
 REFLOW_STEPS = 32   # high-step teacher solver for reflow pairs
 
 # Inference
