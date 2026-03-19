@@ -490,8 +490,14 @@ while True:
         )
 
     step += 1
-    if step > 5 and total_training_time >= TIME_BUDGET:
-        break
+    if step > 5:
+        # Broadcast stop flag so ALL ranks exit at the same step (prevents NCCL deadlock)
+        stop_flag = torch.tensor(
+            [1.0 if total_training_time >= TIME_BUDGET else 0.0], device=device
+        )
+        accelerator.reduce(stop_flag, reduction="sum")
+        if stop_flag.item() > 0:
+            break
 
 if is_master:
     print()
